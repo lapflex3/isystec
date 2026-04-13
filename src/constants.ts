@@ -259,7 +259,9 @@ export const BUSINESS_INFO = {
   location: 'Malaysia',
   whatsappNumber: '',
   whatsappLinkFallback: 'https://wa.me/',
-  shopifyStoreUrl: '',
+  shopifyStoreUrl: import.meta.env.VITE_SHOPIFY_STORE_URL || '',
+  shopifyStorefrontAccessToken: import.meta.env.VITE_SHOPIFY_STOREFRONT_ACCESS_TOKEN || '',
+  shopifyStorefrontApiVersion: import.meta.env.VITE_SHOPIFY_STOREFRONT_API_VERSION || '2026-01',
   shopifyCartPath: '/cart/',
   duitNowQrUrl: '',
 };
@@ -268,13 +270,13 @@ export const PAYMENT_OPTIONS = [
   {
     id: 'shopify',
     title: 'Shopify Checkout',
-    description: 'Buka cart permalink Shopify bila store URL dan variant ID produk sudah diisi.',
+    description: 'Buka checkout Shopify sebenar melalui Storefront API bila token dan variant ID sudah diisi.',
     status: 'Perlu setup',
   },
   {
     id: 'fpx',
     title: 'FPX / Debit / Credit Card',
-    description: 'Boleh diaktifkan melalui Shopify Payments atau gateway payment yang disambungkan.',
+    description: 'Jika FPX diaktifkan pada Shopify checkout atau gateway pihak ketiga, pelanggan akan bayar terus di checkout yang sama.',
     status: 'Perlu setup',
   },
   {

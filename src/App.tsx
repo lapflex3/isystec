@@ -45,6 +45,7 @@ export default function App() {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [selectedPayment, setSelectedPayment] = useState<PaymentMethod>('shopify');
   const [customer, setCustomer] = useState({ name: '', phone: '', email: '', address: '', note: '' });
 
@@ -59,7 +60,11 @@ export default function App() {
 
   const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
   const cartTotal = cart.reduce((sum, item) => sum + item.sellingPrice * item.quantity, 0);
-  const canUseShopifyCheckout = Boolean(BUSINESS_INFO.shopifyStoreUrl) && cart.length > 0 && cart.every((item) => item.shopifyVariantId);
+  const canUseShopifyCheckout =
+    Boolean(BUSINESS_INFO.shopifyStoreUrl) &&
+    Boolean(BUSINESS_INFO.shopifyStorefrontAccessToken) &&
+    cart.length > 0 &&
+    cart.every((item) => item.shopifyVariantId);
 
   const addToCart = (product: Product) => {
     setCart((current) => {
@@ -76,6 +81,74 @@ export default function App() {
 
   const buildShopifyUrl = () => `${BUSINESS_INFO.shopifyStoreUrl}${BUSINESS_INFO.shopifyCartPath}${cart.map((item) => `${item.shopifyVariantId}:${item.quantity}`).join(',')}`;
   const buildWhatsAppUrl = (message: string) => `${BUSINESS_INFO.whatsappNumber.replace(/\D/g, '') ? `https://wa.me/${BUSINESS_INFO.whatsappNumber.replace(/\D/g, '')}` : BUSINESS_INFO.whatsappLinkFallback}?text=${encodeURIComponent(message)}`;
+
+  const normalizeMerchandiseId = (value: string) => (
+    value.startsWith('gid://shopify/ProductVariant/') ? value : `gid://shopify/ProductVariant/${value}`
+  );
+
+  const createShopifyCheckoutUrl = async () => {
+    const endpoint = `${BUSINESS_INFO.shopifyStoreUrl}/api/${BUSINESS_INFO.shopifyStorefrontApiVersion}/graphql.json`;
+    const query = `
+      mutation CreateCart($input: CartInput!) {
+        cartCreate(input: $input) {
+          cart {
+            checkoutUrl
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const variables = {
+      input: {
+        lines: cart.map((item) => ({
+          merchandiseId: normalizeMerchandiseId(item.shopifyVariantId || ''),
+          quantity: item.quantity,
+        })),
+        attributes: [
+          { key: 'customer_name', value: customer.name },
+          { key: 'customer_phone', value: customer.phone },
+          { key: 'customer_address', value: customer.address },
+          { key: 'customer_note', value: customer.note || '-' },
+          { key: 'requested_payment_method', value: PAYMENT_LABELS[selectedPayment] },
+        ],
+        buyerIdentity: {
+          email: customer.email || undefined,
+          phone: customer.phone || undefined,
+          countryCode: 'MY',
+        },
+      },
+    };
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': BUSINESS_INFO.shopifyStorefrontAccessToken,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    const apiErrors = result?.data?.cartCreate?.userErrors || [];
+    if (apiErrors.length > 0) {
+      throw new Error(apiErrors.map((item: { message: string }) => item.message).join(', '));
+    }
+
+    const checkoutUrl = result?.data?.cartCreate?.cart?.checkoutUrl;
+    if (!checkoutUrl) {
+      throw new Error('Checkout URL tidak dijana oleh Shopify.');
+    }
+
+    return checkoutUrl as string;
+  };
 
   const buildOrderMessage = (method: PaymentMethod) => {
     const lines = cart.map((item) => `- ${item.name} x${item.quantity} = ${money(item.quantity * item.sellingPrice)}`).join('\n');
@@ -104,7 +177,7 @@ export default function App() {
     setCustomer({ name: '', phone: '', email: '', address: '', note: '' });
   };
 
-  const proceedPayment = (event: FormEvent) => {
+  const proceedPayment = async (event: FormEvent) => {
     event.preventDefault();
     if (!customer.name || !customer.phone || !customer.address) {
       window.alert('Isi nama, telefon dan alamat penghantaran dahulu.');
@@ -113,9 +186,18 @@ export default function App() {
 
     const orderMessage = buildOrderMessage(selectedPayment);
     if ((selectedPayment === 'shopify' || selectedPayment === 'fpx') && canUseShopifyCheckout) {
-      window.open(buildShopifyUrl(), '_blank', 'noopener,noreferrer');
-      window.open(buildWhatsAppUrl(`${orderMessage}\n\nPelanggan telah dibawa ke Shopify checkout.`), '_blank', 'noopener,noreferrer');
-      clearOrderState();
+      try {
+        setIsProcessingPayment(true);
+        const checkoutUrl = await createShopifyCheckoutUrl();
+        window.open(checkoutUrl, '_blank', 'noopener,noreferrer');
+        window.open(buildWhatsAppUrl(`${orderMessage}\n\nPelanggan telah dibawa ke Shopify checkout sebenar.`), '_blank', 'noopener,noreferrer');
+        clearOrderState();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Ralat semasa membuat Shopify checkout.';
+        window.alert(`Checkout Shopify gagal: ${message}`);
+      } finally {
+        setIsProcessingPayment(false);
+      }
       return;
     }
 
@@ -319,8 +401,9 @@ export default function App() {
                   <h3 className="mt-3 font-heading text-2xl font-black">Konfigurasi Shopify</h3>
                   <div className="mt-5 grid gap-3 text-sm text-muted-foreground">
                     <div className="rounded-2xl border border-white/10 bg-background/50 p-4"><p className="font-bold text-foreground">`shopifyStoreUrl`</p><p className="mt-1">Contoh: `https://nama-store.myshopify.com`</p></div>
-                    <div className="rounded-2xl border border-white/10 bg-background/50 p-4"><p className="font-bold text-foreground">`shopifyVariantId`</p><p className="mt-1">Isi variant ID produk sebenar untuk bina cart permalink.</p></div>
-                    <div className="rounded-2xl border border-white/10 bg-background/50 p-4"><p className="font-bold text-foreground">Gateway payment</p><p className="mt-1">Aktifkan FPX, debit dan kredit di Shopify admin atau gateway pilihan anda.</p></div>
+                    <div className="rounded-2xl border border-white/10 bg-background/50 p-4"><p className="font-bold text-foreground">`VITE_SHOPIFY_STOREFRONT_ACCESS_TOKEN`</p><p className="mt-1">Isi public storefront token untuk panggilan checkout dari browser.</p></div>
+                    <div className="rounded-2xl border border-white/10 bg-background/50 p-4"><p className="font-bold text-foreground">`shopifyVariantId`</p><p className="mt-1">Isi Shopify Product Variant GID atau ID numerik untuk setiap produk.</p></div>
+                    <div className="rounded-2xl border border-white/10 bg-background/50 p-4"><p className="font-bold text-foreground">Gateway payment</p><p className="mt-1">Aktifkan FPX, debit dan kredit di Shopify admin atau gateway pihak ketiga yang disokong.</p></div>
                   </div>
                 </CardContent>
               </Card>
@@ -467,11 +550,11 @@ export default function App() {
                 </div>
                 <div className="grid gap-2"><Label htmlFor="buyerNote">Nota Tambahan</Label><Textarea id="buyerNote" value={customer.note} onChange={(event) => setCustomer((current) => ({ ...current, note: event.target.value }))} placeholder="Contoh: self pickup / mahu invoice / sudah bayar DuitNow" className="min-h-[88px] rounded-[1.25rem] border-white/10 bg-background/60" /></div>
                 <div className="rounded-[1.25rem] border border-primary/20 bg-primary/10 p-4 text-sm">
-                  {selectedPayment === 'shopify' || selectedPayment === 'fpx' ? (canUseShopifyCheckout ? <p>Shopify checkout sedia dibuka dalam tab baru untuk item yang sudah dipautkan.</p> : <p>Shopify checkout belum lengkap. Isi `shopifyStoreUrl` dan `shopifyVariantId` untuk semua item jika mahu bayaran live.</p>) : selectedPayment === 'duitnow' ? <p>Pelanggan akan dihantar ke WhatsApp dengan arahan bayar ke {BUSINESS_INFO.bank} {BUSINESS_INFO.accountNo}.</p> : <p>Pesanan lengkap akan dihantar terus ke WhatsApp admin untuk semakan manual.</p>}
+                  {selectedPayment === 'shopify' || selectedPayment === 'fpx' ? (canUseShopifyCheckout ? <p>Shopify checkout live akan dijana melalui Storefront API. Kaedah FPX hanya akan muncul jika ia memang aktif di checkout Shopify/gateway anda.</p> : <p>Shopify checkout belum lengkap. Isi `VITE_SHOPIFY_STORE_URL`, `VITE_SHOPIFY_STOREFRONT_ACCESS_TOKEN`, dan `shopifyVariantId` untuk semua item.</p>) : selectedPayment === 'duitnow' ? <p>Pelanggan akan dihantar ke WhatsApp dengan arahan bayar ke {BUSINESS_INFO.bank} {BUSINESS_INFO.accountNo}.</p> : <p>Pesanan lengkap akan dihantar terus ke WhatsApp admin untuk semakan manual.</p>}
                 </div>
               </div>
               <DialogFooter className="mt-6 flex-col gap-2 sm:flex-col">
-                <Button type="submit" className="h-12 w-full rounded-2xl text-base font-bold">Teruskan Pembayaran</Button>
+                <Button type="submit" className="h-12 w-full rounded-2xl text-base font-bold" disabled={isProcessingPayment}>{isProcessingPayment ? 'Memproses checkout...' : 'Teruskan Pembayaran'}</Button>
                 <Button type="button" variant="outline" className="h-12 w-full rounded-2xl font-bold" onClick={copyAccountNumber}><Copy className="mr-2 h-4 w-4" />Salin Akaun CIMB</Button>
               </DialogFooter>
             </form>
